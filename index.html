@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#101018">
+<title>保齡球特攻 Bowling Survivors</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;background:#101018;color:#fff;font-family:system-ui,"Noto Sans TC",sans-serif;overflow:hidden;overscroll-behavior:none}
+canvas{display:block;width:100vw;height:100vh;touch-action:none}
+#ui{position:fixed;inset:0;pointer-events:none}
+.panel{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:rgba(15,18,30,.96);border:2px solid #ffd34d;border-radius:18px;padding:22px;width:min(92vw,430px);max-height:88vh;overflow-y:auto;text-align:center;pointer-events:auto;box-shadow:0 16px 50px #0008}
+h1{margin:0 0 8px;color:#ffd34d;font-size:26px}
+p{margin:6px 0;font-size:14px;line-height:1.5;color:#dfe6f5}
+button{margin:8px 4px;padding:12px 18px;border:0;border-radius:12px;cursor:pointer;font-size:15px;font-weight:700;background:#ffd34d;color:#222;touch-action:manipulation}
+button:active{transform:scale(.98)}
+.card{display:block;width:100%;margin:8px 0;padding:14px;border-radius:12px;background:#232a3d;color:#fff;border:1px solid #3d4a68;cursor:pointer;text-align:left;line-height:1.5}
+.card b{color:#ffd34d}
+#hud{position:absolute;top:10px;left:10px;right:10px;display:flex;gap:8px;align-items:center;font-size:13px;text-shadow:0 2px 4px #000;pointer-events:none}
+.hud-label{white-space:nowrap}
+.bar{flex:1;min-width:24px;height:14px;background:#2a2f40;border-radius:8px;overflow:hidden;border:1px solid #555f77}
+.fill{height:100%;background:#57e389;width:100%;transition:width .08s linear}
+.xp{background:#4da3ff}
+.hidden{display:none!important}
+@media(max-width:420px){#hud{gap:5px;font-size:11px}.hud-label{min-width:auto!important}.bar{height:12px}}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <div id="hud">
+    <div class="hud-label" style="min-width:54px">❤️ <span id="hpText">100</span></div>
+    <div class="bar"><div class="fill" id="hpBar"></div></div>
+    <div class="hud-label" style="min-width:45px">⭐ Lv <span id="lvText">1</span></div>
+    <div class="bar"><div class="fill xp" id="xpBar" style="width:0%"></div></div>
+    <div class="hud-label" style="min-width:48px">⏱ <span id="timeText">0:00</span></div>
+  </div>
+  <div id="startPanel" class="panel">
+    <h1>🎳 保齡球特攻</h1>
+    <p>你是球館裡唯一清醒的保齡球。<br>怪物大軍來襲，用球瓶與旋轉撞擊活下去！</p>
+    <p>電腦：WASD／方向鍵移動<br>手機：按住畫面並往想移動的方向拖曳</p>
+    <button id="startButton">開始遊戲</button>
+  </div>
+  <div id="levelPanel" class="panel hidden">
+    <h1>升級！</h1><p>選擇一項強化</p><div id="cards"></div>
+  </div>
+  <div id="overPanel" class="panel hidden">
+    <h1>GAME OVER</h1><p id="result"></p><button id="restartButton">再玩一次</button>
+  </div>
+</div>
+<script>
+'use strict';
+const cv=document.getElementById('game'),ctx=cv.getContext('2d');
+let W=0,H=0,dpr=1;
+function resize(){
+  dpr=Math.min(window.devicePixelRatio||1,2);
+  W=window.innerWidth;H=window.innerHeight;
+  cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+resize();window.addEventListener('resize',resize);
+
+const keys=Object.create(null);
+const touch={active:false,id:null,startX:0,startY:0,x:0,y:0};
+window.addEventListener('keydown',e=>{const k=e.key.toLowerCase();if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k))e.preventDefault();keys[k]=true;});
+window.addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+window.addEventListener('blur',()=>{for(const k in keys)keys[k]=false;touch.active=false;touch.id=null;});
+cv.addEventListener('pointerdown',e=>{
+  if(state!=='play'||touch.active)return;
+  touch.active=true;touch.id=e.pointerId;
+  touch.startX=touch.x=e.clientX;touch.startY=touch.y=e.clientY;
+  try{cv.setPointerCapture(e.pointerId)}catch(_){}
+});
+cv.addEventListener('pointermove',e=>{
+  if(touch.active&&e.pointerId===touch.id){touch.x=e.clientX;touch.y=e.clientY;}
+});
+function endTouch(e){if(touch.active&&(e.pointerId===undefined||e.pointerId===touch.id)){touch.active=false;touch.id=null;}}
+cv.addEventListener('pointerup',endTouch);cv.addEventListener('pointercancel',endTouch);
+cv.addEventListener('lostpointercapture',endTouch);
+
+let state='menu',player,enemies,bullets,gems,particles,cam,time,spawnTimer,level,xp,xpNext,kills,shake;
+function show(id,v){document.getElementById(id).classList.toggle('hidden',!v);}
+function startGame(){
+  player={x:0,y:0,r:20,hp:100,maxHp:100,speed:190,dmg:1,attackCd:0,attackCdMax:.85,
+    pinCount:3,pinDmg:12,pinSpeed:330,spin:0,spinDmg:8,spinRange:70,regen:0,magnet:95,crit:.05};
+  enemies=[];bullets=[];gems=[];particles=[];
+  cam={x:0,y:0};time=0;spawnTimer=.5;level=1;xp=0;xpNext=5;kills=0;shake=0;
+  touch.active=false;touch.id=null;
+  state='play';show('startPanel',false);show('overPanel',false);show('levelPanel',false);
+  updateHud();
+}
+const upgrades=[
+ {n:'更多球瓶',d:'自動攻擊 +1 根保齡球瓶',f:()=>player.pinCount++},
+ {n:'重型球瓶',d:'球瓶傷害 +35%',f:()=>player.pinDmg*=1.35},
+ {n:'快速投擲',d:'球瓶速度提升 15%，攻擊間隔縮短 15%',f:()=>{player.pinSpeed*=1.15;player.attackCdMax=Math.max(.2,player.attackCdMax*.85)}},
+ {n:'旋轉風暴',d:'旋轉撞擊傷害 +40%',f:()=>player.spinDmg*=1.4},
+ {n:'強力旋轉',d:'旋轉範圍 +18%',f:()=>player.spinRange*=1.18},
+ {n:'鋼鐵球體',d:'最大生命 +25，並立即回復 25',f:()=>{player.maxHp+=25;player.hp=Math.min(player.maxHp,player.hp+25)}},
+ {n:'自動修復',d:'每秒回復 1.5 HP',f:()=>player.regen+=1.5},
+ {n:'磁力球溝',d:'撿寶範圍 +45%',f:()=>player.magnet*=1.45},
+ {n:'幸運球',d:'暴擊率 +8%',f:()=>player.crit=Math.min(.75,player.crit+.08)},
+ {n:'疾速滾動',d:'移動速度 +12%',f:()=>player.speed*=1.12}
+];
+function levelUp(){
+  level++;xp-=xpNext;xpNext=Math.floor(xpNext*1.35+3);
+  state='upgrade';touch.active=false;touch.id=null;show('levelPanel',true);
+  const box=document.getElementById('cards');box.replaceChildren();
+  const choices=[...upgrades].sort(()=>Math.random()-.5).slice(0,3);
+  choices.forEach(u=>{
+    const b=document.createElement('button');b.className='card';
+    const title=document.createElement('b');title.textContent=u.n;
+    const desc=document.createElement('span');desc.textContent=u.d;
+    b.append(title,document.createElement('br'),desc);
+    b.addEventListener('click',()=>{u.f();show('levelPanel',false);state='play';updateHud();});
+    box.appendChild(b);
+  });
+}
+function spawnEnemy(){
+  const a=Math.random()*Math.PI*2,d=Math.max(W,H)*.62;
+  const tier=Math.min(3,Math.floor(time/35)),r=12+Math.random()*6+tier*2;
+  const hp=(8+time*.55)*(1+tier*.55);
+  enemies.push({x:player.x+Math.cos(a)*d,y:player.y+Math.sin(a)*d,r,hp,maxHp:hp,
+    speed:42+Math.random()*22+tier*9,dmg:6+tier*3,
+    color:['#8b5cf6','#ef4444','#f59e0b','#22d3ee'][tier],hit:0});
+}
+function pop(x,y,c,t){particles.push({x,y,vx:(Math.random()-.5)*80,vy:-70,life:.6,c,t});}
+function killEnemy(e){
+  if(e.dead)return;e.dead=true;kills++;pop(e.x,e.y,'#fff','+1');
+  gems.push({x:e.x,y:e.y,r:5,v:1});
+  if(Math.random()<.045)gems.push({x:e.x+8,y:e.y,r:8,v:5});
+}
+function damageEnemy(e,d){
+  if(e.dead)return;
+  const crit=Math.random()<player.crit;e.hp-=d*(crit?2:1);e.hit=.12;
+  if(crit)pop(e.x,e.y-e.r,'#ffd34d','暴擊!');
+  if(e.hp<=0)killEnemy(e);
+}
+function updateHud(){
+  document.getElementById('hpText').textContent=Math.max(0,Math.ceil(player.hp));
+  document.getElementById('hpBar').style.width=(Math.max(0,player.hp)/player.maxHp*100)+'%';
+  document.getElementById('lvText').textContent=level;
+  document.getElementById('xpBar').style.width=(xp/xpNext*100)+'%';
+  document.getElementById('timeText').textContent=Math.floor(time/60)+':'+String(Math.floor(time%60)).padStart(2,'0');
+}
+function update(dt){
+  time+=dt;
+  let mx=0,my=0;
+  if(keys['a']||keys['arrowleft'])mx--;
+  if(keys['d']||keys['arrowright'])mx++;
+  if(keys['w']||keys['arrowup'])my--;
+  if(keys['s']||keys['arrowdown'])my++;
+  if(touch.active){
+    const dx=touch.x-touch.startX,dy=touch.y-touch.startY,m=Math.hypot(dx,dy);
+    if(m>10){mx=dx/m;my=dy/m;}
+    else{mx=0;my=0;}
+  }
+  const m=Math.hypot(mx,my);
+  if(m>0){player.x+=mx/m*player.speed*dt;player.y+=my/m*player.speed*dt;}
+  cam.x+=(player.x-cam.x)*Math.min(1,dt*6);cam.y+=(player.y-cam.y)*Math.min(1,dt*6);
+  player.hp=Math.min(player.maxHp,player.hp+player.regen*dt);player.spin+=dt*3.2;
+
+  spawnTimer-=dt;
+  if(spawnTimer<=0){
+    spawnTimer=Math.max(.12,.75-time*.006);
+    const n=1+Math.floor(time/25);
+    for(let i=0;i<n;i++)spawnEnemy();
+  }
+  player.attackCd-=dt;
+  if(player.attackCd<=0){
+    player.attackCd=player.attackCdMax;
+    for(let i=0;i<player.pinCount;i++){
+      const a=Math.random()*Math.PI*2;
+      bullets.push({x:player.x,y:player.y,vx:Math.cos(a)*player.pinSpeed,vy:Math.sin(a)*player.pinSpeed,
+        r:7,dmg:player.pinDmg,life:1.6,rot:0});
+    }
+  }
+  bullets.forEach(b=>{
+    b.x+=b.vx*dt;b.y+=b.vy*dt;b.life-=dt;b.rot+=dt*14;
+    for(const e of enemies){
+      if(!e.dead&&Math.hypot(b.x-e.x,b.y-e.y)<b.r+e.r){damageEnemy(e,b.dmg);b.life=0;break;}
+    }
+  });
+  bullets=bullets.filter(b=>b.life>0);
+
+  const sr=player.spinRange;
+  enemies.forEach(e=>{
+    if(e.dead)return;
+    if(Math.hypot(e.x-player.x,e.y-player.y)<sr+e.r){
+      e.hp-=player.spinDmg*dt;e.hit=.06;
+      const a=Math.atan2(e.y-player.y,e.x-player.x);
+      e.x+=Math.cos(a)*60*dt;e.y+=Math.sin(a)*60*dt;
+      if(e.hp<=0)killEnemy(e);
+    }
+  });
+  enemies=enemies.filter(e=>!e.dead);
+  enemies.forEach(e=>{
+    const a=Math.atan2(player.y-e.y,player.x-e.x);
+    e.x+=Math.cos(a)*e.speed*dt;e.y+=Math.sin(a)*e.speed*dt;e.hit=Math.max(0,e.hit-dt);
+    if(Math.hypot(e.x-player.x,e.y-player.y)<e.r+player.r)player.hp-=e.dmg*dt;
+  });
+  gems.forEach(g=>{
+    const dx=player.x-g.x,dy=player.y-g.y,d=Math.hypot(dx,dy);
+    if(d<player.magnet&&d>0){const pull=Math.min(1,260*dt/d);g.x+=dx*pull;g.y+=dy*pull;}
+    if(d<player.r+g.r){xp+=g.v;g.dead=true;}
+  });
+  gems=gems.filter(g=>!g.dead);
+  particles.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=180*dt;p.life-=dt;});
+  particles=particles.filter(p=>p.life>0);
+
+  if(xp>=xpNext)levelUp();
+  if(player.hp<=0){
+    player.hp=0;state='over';touch.active=false;
+    document.getElementById('result').textContent=`存活 ${Math.floor(time/60)} 分 ${Math.floor(time%60)} 秒，擊殺 ${kills} 隻怪物。`;
+    show('overPanel',true);
+  }
+  updateHud();
+}
+function drawBowlingBall(x,y,r,rot){
+  ctx.save();ctx.translate(x,y);ctx.rotate(rot);
+  const g=ctx.createRadialGradient(-r*.3,-r*.3,r*.2,0,0,r);
+  g.addColorStop(0,'#7dd3fc');g.addColorStop(1,'#1d4ed8');
+  ctx.fillStyle=g;ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#111827';
+  [[-.32,-.22],[0,-.38],[.32,-.22]].forEach(p=>{ctx.beginPath();ctx.arc(p[0]*r,p[1]*r,r*.13,0,Math.PI*2);ctx.fill();});
+  ctx.restore();
+}
+function drawPin(x,y,rot){
+  ctx.save();ctx.translate(x,y);ctx.rotate(rot);
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.ellipse(0,0,5,13,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#ef4444';ctx.fillRect(-4,-7,8,3);ctx.restore();
+}
+function draw(){
+  ctx.fillStyle='#141826';ctx.fillRect(0,0,W,H);
+  if(!player||state==='menu')return;
+  ctx.save();
+  const sx=(Math.random()-.5)*shake,sy=(Math.random()-.5)*shake;
+  ctx.translate(W/2-cam.x+sx,H/2-cam.y+sy);
+  ctx.strokeStyle='#232a3d';ctx.lineWidth=2;
+  const gs=90,x0=Math.floor((cam.x-W/2)/gs)*gs,y0=Math.floor((cam.y-H/2)/gs)*gs;
+  for(let x=x0;x<cam.x+W/2+gs;x+=gs){ctx.beginPath();ctx.moveTo(x,cam.y-H/2);ctx.lineTo(x,cam.y+H/2);ctx.stroke();}
+  for(let y=y0;y<cam.y+H/2+gs;y+=gs){ctx.beginPath();ctx.moveTo(cam.x-W/2,y);ctx.lineTo(cam.x+W/2,y);ctx.stroke();}
+  gems.forEach(g=>{ctx.fillStyle=g.v>1?'#ffd34d':'#4da3ff';ctx.beginPath();ctx.arc(g.x,g.y,g.r,0,Math.PI*2);ctx.fill();});
+  enemies.forEach(e=>{
+    ctx.fillStyle=e.hit>0?'#fff':e.color;ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='rgba(0,0,0,.4)';ctx.fillRect(e.x-e.r,e.y-e.r-8,e.r*2,4);
+    ctx.fillStyle='#57e389';ctx.fillRect(e.x-e.r,e.y-e.r-8,e.r*2*Math.max(0,e.hp/e.maxHp),4);
+  });
+  bullets.forEach(b=>drawPin(b.x,b.y,b.rot));
+  ctx.strokeStyle='rgba(125,211,252,.25)';ctx.lineWidth=3;
+  ctx.beginPath();ctx.arc(player.x,player.y,player.spinRange,0,Math.PI*2);ctx.stroke();
+  drawBowlingBall(player.x,player.y,player.r,player.spin);
+  ctx.font='13px system-ui';ctx.textAlign='center';
+  particles.forEach(p=>{ctx.globalAlpha=Math.max(0,p.life/.6);ctx.fillStyle=p.c;ctx.fillText(p.t,p.x,p.y);});
+  ctx.globalAlpha=1;ctx.restore();
+}
+document.getElementById('startButton').addEventListener('click',startGame);
+document.getElementById('restartButton').addEventListener('click',startGame);
+let last=performance.now();
+function loop(t){
+  const dt=Math.min(.033,Math.max(0,(t-last)/1000));last=t;
+  if(state==='play')update(dt);
+  shake=Math.max(0,shake-dt*30);
+  draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
